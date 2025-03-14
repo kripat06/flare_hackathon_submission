@@ -59,6 +59,10 @@ from langchain_community.llms import HuggingFaceHub
 # Import streamlit
 import streamlit as st
 
+# Add to imports section
+from query_processing import process_query, QueryProcessor
+from web_search import enhance_with_web_search
+
 ####################################################################
 #              Config: LLM services, assistant language,...
 ####################################################################
@@ -113,27 +117,18 @@ if "memory" not in st.session_state:
 ####################################################################
 #            Create app interface with streamlit
 ####################################################################
-st.set_page_config(page_title="Chat With Your Data")
+st.set_page_config(page_title="Chat With Our AI Expert")
 
-st.title("🤖 RAG chatbot")
+st.title("Flare X Google RAG Chatbot")
 
 def sidebar_and_documentChooser():
     """Create the sidebar and vectorstore loader."""
 
     with st.sidebar:
-        st.caption(
-            "🚀 A retrieval augmented generation chatbot powered by Langchain and Google Gemini"
-        )
-        st.write("")
-
+       
         # Assistant language
         st.session_state.assistant_language = st.selectbox(
             f"Assistant language", list(dict_welcome_message.keys())
-        )
-
-        st.write("\n\n")
-        st.write(
-            "ℹ _Using Google Gemini Pro with Vectorstore backed retriever for optimal performance._"
         )
 
     # Process documents from data directory and create/update vectorstore
@@ -649,19 +644,21 @@ def answer_template(language="english"):
     """Pass the standalone question along with the chat history and context
     to the `LLM` wihch will answer."""
 
-    template = f"""Answer the question at the end, using only the following context (delimited by <context></context>).
-Your answer must be in the language at the end. 
+    template = f""" You are an expert on all things cryptocurrency and blockchain.
 
-<context>
-{{chat_history}}
+                Generate an answer to the user query on the given context. (delimited by <context></context>). If there is no match, use your own expertise knowledge to answer the question.
+                Your answer must be in the language at the end. 
 
-{{context}} 
-</context>
+                <context>
+                {{chat_history}}
 
-Question: {{question}}
+                {{context}} 
+                </context>
 
-Language: {language}.
-"""
+                Question: {{question}}
+
+                Language: {language}.
+                """
     return template
 
 
@@ -696,13 +693,13 @@ Standalone question:""",
     # 4. Instantiate LLMs with Gemini Pro
     standalone_query_generation_llm = ChatGoogleGenerativeAI(
         google_api_key=GOOGLE_API_KEY,
-        model="gemini-1.5-pro",
+        model="gemini-1.5-flash",
         temperature=0.1,
         convert_system_message_to_human=True,
     )
     response_generation_llm = ChatGoogleGenerativeAI(
         google_api_key=GOOGLE_API_KEY,
-        model="gemini-1.5-pro",
+        model="gemini-1.5-flash",
         temperature=0.7,
         convert_system_message_to_human=True,
     )
@@ -742,19 +739,118 @@ def clear_chat_history():
 def get_response_from_LLM(prompt):
     """invoke the LLM, get response, and display results (answer and source documents)."""
     try:
-        # 1. Invoke LLM
+        # Initialize a placeholder for the spinner
+        status_placeholder = st.empty()
+        
+        # Check if we need to enhance with web search
+        status_placeholder.info("🔍 Analyzing query for external information needs...")
+        vectorstore_path = os.path.join(LOCAL_VECTOR_STORE_DIR.as_posix(), "auto_vectorstore")
+        
+        # Detect wallet addresses first
+        from web_search import WebSearchEnhancer
+        enhancer = WebSearchEnhancer(GOOGLE_API_KEY)
+        has_wallet, wallet_type, wallet_address = enhancer.detect_wallet_address(prompt)
+        
+        if has_wallet:
+            status_placeholder.info(f"💰 Fetching information about {wallet_type} wallet {wallet_address}...")
+            
+        web_search_results = enhance_with_web_search(prompt, GOOGLE_API_KEY, vectorstore_path)
+        
+        # If web search was performed and documents were added, reload the vectorstore
+        if web_search_results['external_search_performed']:
+            if web_search_results['documents_added'] > 0:
+                status_placeholder.info(f"📥 Adding {web_search_results['documents_added']} new documents from external sources...")
+                # Reload vectorstore to include new documents
+                embeddings = GoogleGenerativeAIEmbeddings(
+                    model="models/embedding-001", 
+                    google_api_key=GOOGLE_API_KEY
+                )
+                st.session_state.vector_store = Chroma(
+                    embedding_function=embeddings,
+                    persist_directory=vectorstore_path,
+                )
+                st.session_state.retriever = st.session_state.vector_store.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 16}
+                )
+        
+        # Process query using enhanced retrieval if retriever is available
+        if st.session_state.retriever:
+            try:
+                # Process query using query processor
+                status_placeholder.info("🧠 Generating subqueries to improve retrieval...")
+                from query_processing import process_query
+                query_results = process_query(prompt, st.session_state.retriever, GOOGLE_API_KEY)
+            except Exception as query_error:
+                print(f"Error in query processing: {str(query_error)}")
+                query_results = {
+                    'subqueries': [],
+                    'document_votes': {},
+                    'chunks': []
+                }
+        else:
+            query_results = {
+                'subqueries': [],
+                'document_votes': {},
+                'chunks': []
+            }
+        
+        # Get response using original chain
+        status_placeholder.info("🔎 Querying vector database for relevant documents...")
+        
+        # Get response using original chain
+        status_placeholder.info("🤖 Generating response with Gemini...")
         response = st.session_state.chain.invoke({"question": prompt})
         answer = response["answer"]
 
-        # 2. Display results
+        # Clear the status message
+        status_placeholder.empty()
+        
+        # Display results
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.messages.append({"role": "assistant", "content": answer})
         st.chat_message("user").write(prompt)
+        
         with st.chat_message("assistant"):
-            # 2.1. Display answer:
+            # If we have wallet info, display it with better formatting
+            if web_search_results.get('wallet_info'):
+                wallet_info = web_search_results.get('wallet_info', '')
+                wallet_source = web_search_results.get('wallet_source')
+                
+                # Create a clean card for wallet information
+                with st.container():
+                    st.markdown("### 💰 Wallet Information")
+                    st.markdown(wallet_info)
+                    
+                    if wallet_source:
+                        st.markdown(f"**Source:** [{wallet_source}]({wallet_source})")
+                    
+                    st.markdown("---")
+            
+            # Display the answer
             st.markdown(answer)
-
-            # 2.2. Display source documents:
+            
+            # Show web search results if any
+            if web_search_results['search_results']:
+                with st.expander("**Web Search Results**"):
+                    for i, result in enumerate(web_search_results['search_results'], 1):
+                        st.markdown(f"**{i}. [{result['title']}]({result['link']})**")
+                        st.markdown(result['snippet'])
+                        st.markdown("---")
+            
+            # Add subquery information in an expander if we have results
+            if query_results['subqueries']:
+                with st.expander("**Query Analysis**"):
+                    st.write("**Generated Subqueries:**")
+                    for i, subq in enumerate(query_results['subqueries'], 1):
+                        st.write(f"{i}. {subq}")
+                    
+                    if query_results['document_votes']:
+                        st.write("\n**Document Relevance Votes:**")
+                        for doc_id, votes in query_results['document_votes'].items():
+                            st.write(f"Document: {os.path.basename(doc_id)} - {votes} votes")
+            
+            # Original source documents expander
             with st.expander("**Source documents**"):
                 documents_content = ""
                 for document in response["source_documents"]:
@@ -769,11 +865,10 @@ def get_response_from_LLM(prompt):
                         + "**\n\n"
                     )
                     documents_content += document.page_content + "\n\n\n"
-
                 st.markdown(documents_content)
 
     except Exception as e:
-        st.warning(e)
+        st.warning(f"Error: {str(e)}")
 
 
 ####################################################################
@@ -784,7 +879,7 @@ def chatbot():
     st.divider()
     col1, col2 = st.columns([7, 3])
     with col1:
-        st.subheader("Chat with your data")
+        st.subheader("Chat With Our Expert")
     with col2:
         st.button("Clear Chat History", on_click=clear_chat_history)
 
@@ -808,3 +903,13 @@ def chatbot():
 
 if __name__ == "__main__":
     chatbot()
+
+
+
+#Query q
+#Gemini: Given query q, create K distinct subqueries
+#U match each subquery to a document, and vote and see which document the queries agree om
+#U use the highest voted document
+#Split your text file/csv file data into a list of sentences, and use Sentence Transformers to embed each sentence
+#You look at consecutive sentences and compare their embedding vectors and calculate the distance between these vectors.
+#If the distance exceeds some threshold, you split the text at that point 

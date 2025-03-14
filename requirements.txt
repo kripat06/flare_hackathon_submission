@@ -173,3 +173,6 @@ zipp==3.17.0
 zope.event==5.0
 zope.interface==6.1
 zope.schema==7.0.1
+sentence-transformers 
+nltk 
+numpy
