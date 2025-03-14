@@ -1,6 +1,6 @@
 # Advanced RAG Chatbot
 
-A retrieval augmented generation chatbot powered by Google Gemini, advanced vectorstore techniques, and online query capabilities.
+A retrieval augmented generation chatbot powered by Google Gemini, LangChain Framework, advanced ChromaDB-based vectorstore techniques, and online query capabilities. Chatbot can run on a TEE virtual machine to ensure runtime security.
 
 ## Overview
 
