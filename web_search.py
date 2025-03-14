@@ -259,14 +259,18 @@ class WebSearchEnhancer:
         if not content or len(content) < 100:
             return f"Information about this wallet can be found at: {explorer_url}"
         
-        # Use LLM to summarize the wallet information with clear formatting instructions
+        # Use LLM to summarize the wallet information with strict formatting instructions
         prompt = f"""Summarize the following information about a {wallet_type} wallet ({wallet_address}).
         Focus on balance, transaction history, and any notable activity.
         
-        Format your response in clear, well-structured paragraphs with proper spacing.
-        Use bullet points for listing tokens or key information.
         IMPORTANT FORMATTING INSTRUCTIONS:
-
+        1. Use ONLY plain text with proper spacing between words
+        2. Keep all sentences under 80 characters in width
+        3. Use proper line breaks between paragraphs
+        4. Format lists with proper indentation and line breaks
+        5. Ensure there are spaces between all words and after punctuation
+        6. DO NOT use special formatting, markdown, or unusual characters
+        7. Format currency values with proper spacing (e.g., "38,368.73 USD" not "38,368.73USD")
         
         Information:
         {content[:5000]}
@@ -275,21 +279,48 @@ class WebSearchEnhancer:
         
         try:
             response = self.llm.invoke(prompt)
-            # Format the response for better display
+            # Clean up the response text
             formatted_text = str(response).strip()
-        
-            # Fix common formatting issues
-            formatted_text = re.sub(r'([a-zA-Z])\.([a-zA-Z])', r'\1. \2', formatted_text)  # Add space after period
-            formatted_text = re.sub(r'([a-zA-Z]),([a-zA-Z])', r'\1, \2', formatted_text)   # Add space after comma
-            formatted_text = re.sub(r'([a-zA-Z])([0-9])', r'\1 \2', formatted_text)        # Add space between text and numbers
-            formatted_text = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', formatted_text)        # Add space between numbers and text
-            formatted_text = re.sub(r'\.{2,}', '. ', formatted_text)                       # Fix multiple periods
-            formatted_text = re.sub(r'\s{2,}', ' ', formatted_text)                        # Fix multiple spaces
+            
+            # Apply additional text cleanup to fix common formatting issues
+            # Fix missing spaces after punctuation
+            formatted_text = re.sub(r'([.,!?:;])([A-Za-z0-9])', r'\1 \2', formatted_text)
+            
+            # Fix missing spaces between numbers and units
+            formatted_text = re.sub(r'(\d+)([A-Za-z])', r'\1 \2', formatted_text)
+            
+            # Fix missing spaces between words (camelCase or words stuck together)
+            formatted_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', formatted_text)
+            
+            # Ensure proper spacing around currency symbols
+            formatted_text = re.sub(r'(\d+)(\$|€|£|¥)', r'\1 \2', formatted_text)
+            formatted_text = re.sub(r'(\$|€|£|¥)(\d+)', r'\1 \2', formatted_text)
+            
+            # Fix multiple spaces
+            formatted_text = re.sub(r' {2,}', ' ', formatted_text)
+            
+            # Ensure proper line breaks (replace \n\n with actual line breaks)
+            formatted_text = formatted_text.replace('\\n\\n', '\n\n')
+            formatted_text = formatted_text.replace('\\n', '\n')
+            
+            # Wrap long lines to ensure they don't extend too far
+            wrapped_lines = []
+            for line in formatted_text.split('\n'):
+                # Wrap at 80 characters
+                if len(line) > 80:
+                    # Use textwrap to wrap long lines
+                    import textwrap
+                    wrapped = textwrap.fill(line, width=80)
+                    wrapped_lines.append(wrapped)
+                else:
+                    wrapped_lines.append(line)
+            
+            formatted_text = '\n'.join(wrapped_lines)
             
             return f"{formatted_text}\n\nSource: {explorer_url}"
         except Exception as e:
             print(f"Error summarizing wallet info: {str(e)}")
-            return f"Information about this wallet can be found at: {explorer_url}"
+            return f"Information about this {wallet_type} wallet ({wallet_address}) can be found at: {explorer_url}"
 
     def create_documents_from_search(self, search_results: List[Dict]) -> List[Document]:
         """

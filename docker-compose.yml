@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  rag-chatbot:
+    build: .
+    container_name: rag-chatbot
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - SERPAPI_API_KEY=${SERPAPI_API_KEY}
+    restart: unless-stopped 

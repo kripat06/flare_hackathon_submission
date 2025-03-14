@@ -62,6 +62,7 @@ import streamlit as st
 # Add to imports section
 from query_processing import process_query, QueryProcessor
 from web_search import enhance_with_web_search
+from accuracy_evaluator import AccuracyEvaluator
 
 ####################################################################
 #              Config: LLM services, assistant language,...
@@ -113,6 +114,10 @@ if "chain" not in st.session_state:
 
 if "memory" not in st.session_state:
     st.session_state.memory = None
+
+# Initialize the accuracy evaluator in a place where it will persist
+if 'accuracy_evaluator' not in st.session_state:
+    st.session_state.accuracy_evaluator = AccuracyEvaluator()
 
 ####################################################################
 #            Create app interface with streamlit
@@ -802,7 +807,13 @@ def get_response_from_LLM(prompt):
         status_placeholder.info("🤖 Generating response with Gemini...")
         response = st.session_state.chain.invoke({"question": prompt})
         answer = response["answer"]
-
+        
+        # Calculate accuracy score
+        accuracy_results = st.session_state.accuracy_evaluator.calculate_similarity(
+            answer, 
+            response["source_documents"]
+        )
+        
         # Clear the status message
         status_placeholder.empty()
         
@@ -817,18 +828,32 @@ def get_response_from_LLM(prompt):
                 wallet_info = web_search_results.get('wallet_info', '')
                 wallet_source = web_search_results.get('wallet_source')
                 
-                # Create a clean card for wallet information
+                # Create a clean container with controlled width for wallet information
                 with st.container():
                     st.markdown("### 💰 Wallet Information")
-                    st.markdown(wallet_info)
+                    
+                    # Use a fixed-width font and wrap the text in a div with max-width
+                    st.markdown(
+                        f"""<div style="max-width: 650px; word-wrap: break-word; white-space: normal; font-family: sans-serif;">
+                        {wallet_info}
+                        </div>""", 
+                        unsafe_allow_html=True
+                    )
                     
                     if wallet_source:
                         st.markdown(f"**Source:** [{wallet_source}]({wallet_source})")
                     
                     st.markdown("---")
             
-            # Display the answer
-            st.markdown(answer)
+            # Display the answer with accuracy badge
+            col1, col2 = st.columns([0.9, 0.1])
+            with col1:
+                st.markdown(answer)
+            with col2:
+                st.markdown(
+                    st.session_state.accuracy_evaluator.get_accuracy_badge(accuracy_results["accuracy_score"]),
+                    unsafe_allow_html=True
+                )
             
             # Show web search results if any
             if web_search_results['search_results']:
@@ -866,6 +891,20 @@ def get_response_from_LLM(prompt):
                     )
                     documents_content += document.page_content + "\n\n\n"
                 st.markdown(documents_content)
+            
+            # Add accuracy details in an expander
+            with st.expander("**Response Accuracy**"):
+                st.markdown(f"**Overall Accuracy Score:** {accuracy_results['accuracy_score']:.2f}")
+                st.markdown(f"**Confidence:** {accuracy_results['confidence']}")
+                st.markdown(f"**Analysis:** {accuracy_results['analysis']}")
+                
+                if 'sentence_scores' in accuracy_results:
+                    st.markdown("**Sentence-level Analysis:**")
+                    sentences = st.session_state.accuracy_evaluator.split_into_sentences(answer)
+                    for i, (sentence, score) in enumerate(zip(sentences, accuracy_results['sentence_scores'])):
+                        if i < len(accuracy_results['sentence_scores']):
+                            color = "green" if score >= 0.7 else "orange" if score >= 0.5 else "red"
+                            st.markdown(f"<span style='color:{color}'>• {sentence} (Score: {score:.2f})</span>", unsafe_allow_html=True)
 
     except Exception as e:
         st.warning(f"Error: {str(e)}")
