@@ -8,19 +8,21 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 import os, glob
 from pathlib import Path
+from dotenv import load_dotenv
 
-# Import openai and google_genai as main LLM services
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+# Load environment variables from .env file
+load_dotenv()
+
+# Import google_genai
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 # langchain prompts, memory, chains...
 from langchain.prompts import PromptTemplate, ChatPromptTemplate
 from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory, ConversationSummaryBufferMemory
+from langchain.memory import ConversationBufferMemory
 
 from langchain.schema import format_document
-
 
 # document loaders
 from langchain_community.document_loaders import (
@@ -32,13 +34,7 @@ from langchain_community.document_loaders import (
 )
 
 # text_splitter
-from langchain.text_splitter import (
-    RecursiveCharacterTextSplitter,
-    CharacterTextSplitter,
-)
-
-# OutputParser
-from langchain_core.output_parsers import StrOutputParser
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # Import chroma as the vector store
 from langchain_community.vectorstores import Chroma
@@ -66,15 +62,15 @@ import streamlit as st
 ####################################################################
 #              Config: LLM services, assistant language,...
 ####################################################################
-list_LLM_providers = [
-    ":rainbow[**OpenAI**]",
-    "**Google Generative AI**",
-    ":hugging_face: **HuggingFace**",
-]
+# Get Google API key from environment variable
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    st.error("Please set the GOOGLE_API_KEY environment variable")
+    st.stop()
 
 dict_welcome_message = {
     "english": "How can I assist you today?",
-    "french": "Comment puis-je vous aider aujourd’hui ?",
+    "french": "Comment puis-je vous aider aujourd'hui ?",
     "spanish": "¿Cómo puedo ayudarle hoy?",
     "german": "Wie kann ich Ihnen heute helfen?",
     "russian": "Чем я могу помочь вам сегодня?",
@@ -85,16 +81,34 @@ dict_welcome_message = {
     "Japanese": "今日はどのようなご用件でしょうか?",
 }
 
-list_retriever_types = [
-    "Cohere reranker",
-    "Contextual compression",
-    "Vectorstore backed retriever",
-]
-
 TMP_DIR = Path(__file__).resolve().parent.joinpath("data", "tmp")
 LOCAL_VECTOR_STORE_DIR = (
     Path(__file__).resolve().parent.joinpath("data", "vector_stores")
 )
+
+# Initialize session state variables
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {
+            "role": "assistant",
+            "content": dict_welcome_message["english"],
+        }
+    ]
+
+if "assistant_language" not in st.session_state:
+    st.session_state.assistant_language = "english"
+
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
+
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
+
+if "chain" not in st.session_state:
+    st.session_state.chain = None
+
+if "memory" not in st.session_state:
+    st.session_state.memory = None
 
 ####################################################################
 #            Create app interface with streamlit
@@ -103,268 +117,150 @@ st.set_page_config(page_title="Chat With Your Data")
 
 st.title("🤖 RAG chatbot")
 
-# API keys
-st.session_state.openai_api_key = ""
-st.session_state.google_api_key = ""
-st.session_state.cohere_api_key = ""
-st.session_state.hf_api_key = ""
-
-
-def expander_model_parameters(
-    LLM_provider="OpenAI",
-    text_input_API_key="OpenAI API Key - [Get an API key](https://platform.openai.com/account/api-keys)",
-    list_models=["gpt-3.5-turbo-0125", "gpt-3.5-turbo", "gpt-4-turbo-preview"],
-):
-    """Add a text_input (for API key) and a streamlit expander containing models and parameters."""
-    st.session_state.LLM_provider = LLM_provider
-
-    if LLM_provider == "OpenAI":
-        st.session_state.openai_api_key = st.text_input(
-            text_input_API_key,
-            type="password",
-            placeholder="insert your API key",
-        )
-        st.session_state.google_api_key = ""
-        st.session_state.hf_api_key = ""
-
-    if LLM_provider == "Google":
-        st.session_state.google_api_key = st.text_input(
-            text_input_API_key,
-            type="password",
-            placeholder="insert your API key",
-        )
-        st.session_state.openai_api_key = ""
-        st.session_state.hf_api_key = ""
-
-    if LLM_provider == "HuggingFace":
-        st.session_state.hf_api_key = st.text_input(
-            text_input_API_key,
-            type="password",
-            placeholder="insert your API key",
-        )
-        st.session_state.openai_api_key = ""
-        st.session_state.google_api_key = ""
-
-    with st.expander("**Models and parameters**"):
-        st.session_state.selected_model = st.selectbox(
-            f"Choose {LLM_provider} model", list_models
-        )
-
-        # model parameters
-        st.session_state.temperature = st.slider(
-            "temperature",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.5,
-            step=0.1,
-        )
-        st.session_state.top_p = st.slider(
-            "top_p",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.95,
-            step=0.05,
-        )
-
-
 def sidebar_and_documentChooser():
-    """Create the sidebar and the a tabbed pane: the first tab contains a document chooser (create a new vectorstore);
-    the second contains a vectorstore chooser (open an old vectorstore)."""
+    """Create the sidebar and vectorstore loader."""
 
     with st.sidebar:
         st.caption(
-            "🚀 A retrieval augmented generation chatbot powered by 🔗 Langchain, Cohere, OpenAI, Google Generative AI and 🤗"
+            "🚀 A retrieval augmented generation chatbot powered by Langchain and Google Gemini"
         )
         st.write("")
 
-        llm_chooser = st.radio(
-            "Select provider",
-            list_LLM_providers,
-            captions=[
-                "[OpenAI pricing page](https://openai.com/pricing)",
-                "Rate limit: 60 requests per minute.",
-                "**Free access.**",
-            ],
-        )
-
-        st.divider()
-        if llm_chooser == list_LLM_providers[0]:
-            expander_model_parameters(
-                LLM_provider="OpenAI",
-                text_input_API_key="OpenAI API Key - [Get an API key](https://platform.openai.com/account/api-keys)",
-                list_models=[
-                    "gpt-3.5-turbo-0125",
-                    "gpt-3.5-turbo",
-                    "gpt-4-turbo-preview",
-                ],
-            )
-
-        if llm_chooser == list_LLM_providers[1]:
-            expander_model_parameters(
-                LLM_provider="Google",
-                text_input_API_key="Google API Key - [Get an API key](https://makersuite.google.com/app/apikey)",
-                list_models=["gemini-pro"],
-            )
-        if llm_chooser == list_LLM_providers[2]:
-            expander_model_parameters(
-                LLM_provider="HuggingFace",
-                text_input_API_key="HuggingFace API key - [Get an API key](https://huggingface.co/settings/tokens)",
-                list_models=["mistralai/Mistral-7B-Instruct-v0.2"],
-            )
         # Assistant language
-        st.write("")
         st.session_state.assistant_language = st.selectbox(
             f"Assistant language", list(dict_welcome_message.keys())
         )
 
-        st.divider()
-        st.subheader("Retrievers")
-        retrievers = list_retriever_types
-        if st.session_state.selected_model == "gpt-3.5-turbo":
-            # for "gpt-3.5-turbo", we will not use the vectorstore backed retriever
-            # there is a high risk of exceeding the max tokens limit (4096).
-            retrievers = list_retriever_types[:-1]
-
-        st.session_state.retriever_type = st.selectbox(
-            f"Select retriever type", retrievers
-        )
-        st.write("")
-        if st.session_state.retriever_type == list_retriever_types[0]:  # Cohere
-            st.session_state.cohere_api_key = st.text_input(
-                "Coher API Key - [Get an API key](https://dashboard.cohere.com/api-keys)",
-                type="password",
-                placeholder="insert your API key",
-            )
-
         st.write("\n\n")
         st.write(
-            f"ℹ _Your {st.session_state.LLM_provider} API key, '{st.session_state.selected_model}' parameters, \
-            and {st.session_state.retriever_type} are only considered when loading or creating a vectorstore._"
+            "ℹ _Using Google Gemini Pro with Vectorstore backed retriever for optimal performance._"
         )
 
-    # Tabbed Pane: Create a new Vectorstore | Open a saved Vectorstore
+    # Process documents from data directory and create/update vectorstore
+    data_dir = Path(__file__).resolve().parent.joinpath("data")
+    vectorstore_name = "auto_vectorstore"
+    vectorstore_path = os.path.join(LOCAL_VECTOR_STORE_DIR.as_posix(), vectorstore_name)
+    
+    # Create directories if they don't exist
+    os.makedirs(LOCAL_VECTOR_STORE_DIR, exist_ok=True)
+    os.makedirs(TMP_DIR, exist_ok=True)
 
-    tab_new_vectorstore, tab_open_vectorstore = st.tabs(
-        ["Create a new Vectorstore", "Open a saved Vectorstore"]
-    )
-    with tab_new_vectorstore:
-        # 1. Select documnets
-        st.session_state.uploaded_file_list = st.file_uploader(
-            label="**Select documents**",
-            accept_multiple_files=True,
-            type=(["pdf", "txt", "docx", "csv"]),
-        )
-        # 2. Process documents
-        st.session_state.vector_store_name = st.text_input(
-            label="**Documents will be loaded, embedded and ingested into a vectorstore (Chroma dB). Please provide a valid dB name.**",
-            placeholder="Vectorstore name",
-        )
-        # 3. Add a button to process documnets and create a Chroma vectorstore
+    # Check if we need to update the vectorstore
+    should_update = False
+    if not os.path.exists(vectorstore_path):
+        should_update = True
+    else:
+        # Check if any files in data_dir are newer than the vectorstore
+        vectorstore_mtime = os.path.getmtime(vectorstore_path)
+        for root, _, files in os.walk(data_dir):
+            for file in files:
+                if file.lower().endswith(('.pdf', '.txt', '.docx', '.csv')):
+                    file_path = os.path.join(root, file)
+                    if os.path.getmtime(file_path) > vectorstore_mtime:
+                        should_update = True
+                        break
+            if should_update:
+                break
 
-        st.button("Create Vectorstore", on_click=chain_RAG_blocks)
+    if should_update:
+        with st.spinner("Processing documents and updating vectorstore..."):
+            try:
+                # First check if there are any documents in the data directory
+                data_files = []
+                for root, _, files in os.walk(data_dir):
+                    for file in files:
+                        if file.lower().endswith(('.pdf', '.txt', '.docx', '.csv')):
+                            data_files.append(os.path.join(root, file))
+                
+                if not data_files:
+                    st.error(f"No supported documents found in {data_dir}. Please add PDF, TXT, DOCX, or CSV files.")
+                    st.stop()
+                
+                st.info(f"Found {len(data_files)} documents to process: {', '.join(os.path.basename(f) for f in data_files)}")
+
+                # Copy files to temp directory
+                for src_path in data_files:
+                    dst_path = os.path.join(TMP_DIR, os.path.basename(src_path))
+                    with open(src_path, 'rb') as src, open(dst_path, 'wb') as dst:
+                        dst.write(src.read())
+
+                # Load and process documents
+                documents = langchain_document_loader()
+                chunks = split_documents_to_chunks(documents)
+                
+                # Create vectorstore
+                embeddings = GoogleGenerativeAIEmbeddings(
+                    model="models/embedding-001", 
+                    google_api_key=GOOGLE_API_KEY
+                )
+                st.session_state.vector_store = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=embeddings,
+                    persist_directory=vectorstore_path,
+                )
+
+                # Create retriever
+                st.session_state.retriever = st.session_state.vector_store.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 16}
+                )
+
+                # Create memory and ConversationalRetrievalChain
+                st.session_state.chain, st.session_state.memory = create_ConversationalRetrievalChain(
+                    retriever=st.session_state.retriever,
+                    chain_type="stuff",
+                    language=st.session_state.assistant_language,
+                )
+
+                # Clear chat history
+                clear_chat_history()
+
+                st.success("Vectorstore updated successfully!")
+                
+            except Exception as e:
+                st.error(f"Error updating vectorstore: {str(e)}")
+            finally:
+                # Clean up temp directory
+                delte_temp_files()
+    else:
+        # Load existing vectorstore
         try:
-            if st.session_state.error_message != "":
-                st.warning(st.session_state.error_message)
-        except:
-            pass
+            st.info("Loading existing vectorstore...")
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001", 
+                google_api_key=GOOGLE_API_KEY
+            )
+            st.session_state.vector_store = Chroma(
+                embedding_function=embeddings,
+                persist_directory=vectorstore_path,
+            )
 
-    with tab_open_vectorstore:
-        # Open a saved Vectorstore
-        # https://github.com/streamlit/streamlit/issues/1019
-        st.write("Please select a Vectorstore:")
-        import tkinter as tk
-        from tkinter import filedialog
+            # Log the number of documents in the vectorstore
+            collection = st.session_state.vector_store._collection
+            doc_count = collection.count()
+            st.info(f"Found {doc_count} documents in the vectorstore.")
 
-        clicked = st.button("Vectorstore chooser")
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)  # Make dialog appear on top of other windows
+            if doc_count == 0:
+                st.error("Vectorstore is empty. Please add some documents to the data directory.")
+                st.stop()
 
-        st.session_state.selected_vectorstore_name = ""
+            st.session_state.retriever = st.session_state.vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": 16}
+            )
 
-        if clicked:
-            # Check inputs
-            error_messages = []
-            if (
-                not st.session_state.openai_api_key
-                and not st.session_state.google_api_key
-                and not st.session_state.hf_api_key
-            ):
-                error_messages.append(
-                    f"insert your {st.session_state.LLM_provider} API key"
-                )
+            st.session_state.chain, st.session_state.memory = create_ConversationalRetrievalChain(
+                retriever=st.session_state.retriever,
+                chain_type="stuff",
+                language=st.session_state.assistant_language,
+            )
 
-            if (
-                st.session_state.retriever_type == list_retriever_types[0]
-                and not st.session_state.cohere_api_key
-            ):
-                error_messages.append(f"insert your Cohere API key")
-
-            if len(error_messages) == 1:
-                st.session_state.error_message = "Please " + error_messages[0] + "."
-                st.warning(st.session_state.error_message)
-            elif len(error_messages) > 1:
-                st.session_state.error_message = (
-                    "Please "
-                    + ", ".join(error_messages[:-1])
-                    + ", and "
-                    + error_messages[-1]
-                    + "."
-                )
-                st.warning(st.session_state.error_message)
-
-            # if API keys are inserted, start loading Chroma index, then create retriever and ConversationalRetrievalChain
-            else:
-                selected_vectorstore_path = filedialog.askdirectory(master=root)
-
-                if selected_vectorstore_path == "":
-                    st.info("Please select a valid path.")
-
-                else:
-                    with st.spinner("Loading vectorstore..."):
-                        st.session_state.selected_vectorstore_name = (
-                            selected_vectorstore_path.split("/")[-1]
-                        )
-                        try:
-                            # 1. load Chroma vectorestore
-                            embeddings = select_embeddings_model()
-                            st.session_state.vector_store = Chroma(
-                                embedding_function=embeddings,
-                                persist_directory=selected_vectorstore_path,
-                            )
-
-                            # 2. create retriever
-                            st.session_state.retriever = create_retriever(
-                                vector_store=st.session_state.vector_store,
-                                embeddings=embeddings,
-                                retriever_type=st.session_state.retriever_type,
-                                base_retriever_search_type="similarity",
-                                base_retriever_k=16,
-                                compression_retriever_k=20,
-                                cohere_api_key=st.session_state.cohere_api_key,
-                                cohere_model="rerank-multilingual-v2.0",
-                                cohere_top_n=10,
-                            )
-
-                            # 3. create memory and ConversationalRetrievalChain
-                            (
-                                st.session_state.chain,
-                                st.session_state.memory,
-                            ) = create_ConversationalRetrievalChain(
-                                retriever=st.session_state.retriever,
-                                chain_type="stuff",
-                                language=st.session_state.assistant_language,
-                            )
-
-                            # 4. clear chat_history
-                            clear_chat_history()
-
-                            st.info(
-                                f"**{st.session_state.selected_vectorstore_name}** is loaded successfully."
-                            )
-
-                        except Exception as e:
-                            st.error(e)
+            clear_chat_history()
+            st.success("Vectorstore loaded successfully!")
+            
+        except Exception as e:
+            st.error(f"Error loading vectorstore: {str(e)}")
+            st.stop()
 
 
 ####################################################################
@@ -382,62 +278,80 @@ def delte_temp_files():
 
 def langchain_document_loader():
     """
-    Crete documnet loaders for PDF, TXT and CSV files.
+    Create document loaders for PDF, TXT, CSV, and DOCX files.
     https://python.langchain.com/docs/modules/data_connection/document_loaders/file_directory
     """
-
     documents = []
+    loaded_files = []
+    
+    try:
+        # Load TXT files
+        txt_loader = DirectoryLoader(
+            TMP_DIR.as_posix(), glob="**/*.txt", loader_cls=TextLoader, show_progress=True
+        )
+        txt_docs = txt_loader.load()
+        documents.extend(txt_docs)
+        if txt_docs:
+            loaded_files.extend([doc.metadata["source"] for doc in txt_docs])
+            st.info(f"Loaded {len(txt_docs)} text documents")
 
-    txt_loader = DirectoryLoader(
-        TMP_DIR.as_posix(), glob="**/*.txt", loader_cls=TextLoader, show_progress=True
-    )
-    documents.extend(txt_loader.load())
+        # Load PDF files
+        pdf_loader = DirectoryLoader(
+            TMP_DIR.as_posix(), glob="**/*.pdf", loader_cls=PyPDFLoader, show_progress=True
+        )
+        pdf_docs = pdf_loader.load()
+        documents.extend(pdf_docs)
+        if pdf_docs:
+            loaded_files.extend([doc.metadata["source"] for doc in pdf_docs])
+            st.info(f"Loaded {len(pdf_docs)} PDF documents")
 
-    pdf_loader = DirectoryLoader(
-        TMP_DIR.as_posix(), glob="**/*.pdf", loader_cls=PyPDFLoader, show_progress=True
-    )
-    documents.extend(pdf_loader.load())
+        # Load CSV files
+        csv_loader = DirectoryLoader(
+            TMP_DIR.as_posix(), glob="**/*.csv", loader_cls=CSVLoader, show_progress=True,
+            loader_kwargs={"encoding": "utf8"}
+        )
+        csv_docs = csv_loader.load()
+        documents.extend(csv_docs)
+        if csv_docs:
+            loaded_files.extend([doc.metadata["source"] for doc in csv_docs])
+            st.info(f"Loaded {len(csv_docs)} CSV documents")
 
-    csv_loader = DirectoryLoader(
-        TMP_DIR.as_posix(), glob="**/*.csv", loader_cls=CSVLoader, show_progress=True,
-        loader_kwargs={"encoding":"utf8"}
-    )
-    documents.extend(csv_loader.load())
+        # Load DOCX files
+        doc_loader = DirectoryLoader(
+            TMP_DIR.as_posix(), glob="**/*.docx", loader_cls=Docx2txtLoader, show_progress=True
+        )
+        docx_docs = doc_loader.load()
+        documents.extend(docx_docs)
+        if docx_docs:
+            loaded_files.extend([doc.metadata["source"] for doc in docx_docs])
+            st.info(f"Loaded {len(docx_docs)} DOCX documents")
 
-    doc_loader = DirectoryLoader(
-        TMP_DIR.as_posix(),
-        glob="**/*.docx",
-        loader_cls=Docx2txtLoader,
-        show_progress=True,
-    )
-    documents.extend(doc_loader.load())
-    return documents
+        if not documents:
+            st.error(f"No documents were successfully loaded from {TMP_DIR}")
+            st.info("Files found in directory: " + ", ".join(os.listdir(TMP_DIR.as_posix())))
+            raise ValueError("No documents were loaded")
+
+        st.success(f"Successfully loaded {len(documents)} total documents")
+        return documents
+
+    except Exception as e:
+        st.error(f"Error loading documents: {str(e)}")
+        if loaded_files:
+            st.info(f"Successfully loaded files before error: {', '.join(loaded_files)}")
+        raise
 
 
 def split_documents_to_chunks(documents):
     """Split documents to chunks using RecursiveCharacterTextSplitter."""
-
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1600, chunk_overlap=200)
-    chunks = text_splitter.split_documents(documents)
-    return chunks
-
-
-def select_embeddings_model():
-    """Select embeddings models: OpenAIEmbeddings or GoogleGenerativeAIEmbeddings."""
-    if st.session_state.LLM_provider == "OpenAI":
-        embeddings = OpenAIEmbeddings(api_key=st.session_state.openai_api_key)
-
-    if st.session_state.LLM_provider == "Google":
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001", google_api_key=st.session_state.google_api_key
-        )
-
-    if st.session_state.LLM_provider == "HuggingFace":
-        embeddings = HuggingFaceInferenceAPIEmbeddings(
-            api_key=st.session_state.hf_api_key, model_name="thenlper/gte-large"
-        )
-
-    return embeddings
+    try:
+        st.info(f"Splitting {len(documents)} documents into chunks...")
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1600, chunk_overlap=200)
+        chunks = text_splitter.split_documents(documents)
+        st.success(f"Created {len(chunks)} chunks from the documents")
+        return chunks
+    except Exception as e:
+        st.error(f"Error splitting documents into chunks: {str(e)}")
+        raise
 
 
 def create_retriever(
@@ -608,20 +522,9 @@ def chain_RAG_blocks():
     with st.spinner("Creating vectorstore..."):
         # Check inputs
         error_messages = []
-        if (
-            not st.session_state.openai_api_key
-            and not st.session_state.google_api_key
-            and not st.session_state.hf_api_key
-        ):
-            error_messages.append(
-                f"insert your {st.session_state.LLM_provider} API key"
-            )
+        if not GOOGLE_API_KEY:
+            error_messages.append("set the GOOGLE_API_KEY environment variable")
 
-        if (
-            st.session_state.retriever_type == list_retriever_types[0]
-            and not st.session_state.cohere_api_key
-        ):
-            error_messages.append(f"insert your Cohere API key")
         if not st.session_state.uploaded_file_list:
             error_messages.append("select documents to upload")
         if st.session_state.vector_store_name == "":
@@ -663,8 +566,12 @@ def chain_RAG_blocks():
 
                     # 4. Split documents to chunks
                     chunks = split_documents_to_chunks(documents)
-                    # 5. Embeddings
-                    embeddings = select_embeddings_model()
+                    
+                    # 5. Create embeddings
+                    embeddings = GoogleGenerativeAIEmbeddings(
+                        model="models/embedding-001",
+                        google_api_key=GOOGLE_API_KEY
+                    )
 
                     # 6. Create a vectorstore
                     persist_directory = (
@@ -724,29 +631,12 @@ def chain_RAG_blocks():
 def create_memory(model_name="gpt-3.5-turbo", memory_max_token=None):
     """Creates a ConversationSummaryBufferMemory for gpt-3.5-turbo
     Creates a ConversationBufferMemory for the other models"""
-
-    if model_name == "gpt-3.5-turbo":
-        if memory_max_token is None:
-            memory_max_token = 1024  # max_tokens for 'gpt-3.5-turbo' = 4096
-        memory = ConversationSummaryBufferMemory(
-            max_token_limit=memory_max_token,
-            llm=ChatOpenAI(
-                model_name="gpt-3.5-turbo",
-                openai_api_key=st.session_state.openai_api_key,
-                temperature=0.1,
-            ),
+    memory = ConversationBufferMemory(
             return_messages=True,
             memory_key="chat_history",
             output_key="answer",
             input_key="question",
-        )
-    else:
-        memory = ConversationBufferMemory(
-            return_messages=True,
-            memory_key="chat_history",
-            output_key="answer",
-            input_key="question",
-        )
+    )
     return memory
 
 
@@ -780,17 +670,9 @@ def create_ConversationalRetrievalChain(
     chain_type="stuff",
     language="english",
 ):
-    """Create a ConversationalRetrievalChain.
-    First, it passes the follow-up question along with the chat history to an LLM which rephrases
-    the question and generates a standalone query.
-    This query is then sent to the retriever, which fetches relevant documents (context)
-    and passes them along with the standalone question and chat history to an LLM to answer.
-    """
+    """Create a ConversationalRetrievalChain with Google Gemini Pro."""
 
     # 1. Define the standalone_question prompt.
-    # Pass the follow-up question along with the chat history to the `condense_question_llm`
-    # which rephrases the question and generates a standalone question.
-
     condense_question_prompt = PromptTemplate(
         input_variables=["chat_history", "question"],
         template="""Given the following conversation and a follow up question, 
@@ -801,66 +683,31 @@ Standalone question:""",
     )
 
     # 2. Define the answer_prompt
-    # Pass the standalone question + the chat history + the context (retrieved documents)
-    # to the `LLM` wihch will answer
-
     answer_prompt = ChatPromptTemplate.from_template(answer_template(language=language))
 
-    # 3. Add ConversationSummaryBufferMemory for gpt-3.5, and ConversationBufferMemory for the other models
-    memory = create_memory(st.session_state.selected_model)
+    # 3. Add ConversationBufferMemory
+    memory = ConversationBufferMemory(
+        return_messages=True,
+        memory_key="chat_history",
+        output_key="answer",
+        input_key="question",
+    )
 
-    # 4. Instantiate LLMs: standalone_query_generation_llm & response_generation_llm
-    if st.session_state.LLM_provider == "OpenAI":
-        standalone_query_generation_llm = ChatOpenAI(
-            api_key=st.session_state.openai_api_key,
-            model=st.session_state.selected_model,
-            temperature=0.1,
-        )
-        response_generation_llm = ChatOpenAI(
-            api_key=st.session_state.openai_api_key,
-            model=st.session_state.selected_model,
-            temperature=st.session_state.temperature,
-            model_kwargs={"top_p": st.session_state.top_p},
-        )
-    if st.session_state.LLM_provider == "Google":
-        standalone_query_generation_llm = ChatGoogleGenerativeAI(
-            google_api_key=st.session_state.google_api_key,
-            model=st.session_state.selected_model,
-            temperature=0.1,
-            convert_system_message_to_human=True,
-        )
-        response_generation_llm = ChatGoogleGenerativeAI(
-            google_api_key=st.session_state.google_api_key,
-            model=st.session_state.selected_model,
-            temperature=st.session_state.temperature,
-            top_p=st.session_state.top_p,
-            convert_system_message_to_human=True,
-        )
-
-    if st.session_state.LLM_provider == "HuggingFace":
-        standalone_query_generation_llm = HuggingFaceHub(
-            repo_id=st.session_state.selected_model,
-            huggingfacehub_api_token=st.session_state.hf_api_key,
-            model_kwargs={
-                "temperature": 0.1,
-                "top_p": 0.95,
-                "do_sample": True,
-                "max_new_tokens": 1024,
-            },
-        )
-        response_generation_llm = HuggingFaceHub(
-            repo_id=st.session_state.selected_model,
-            huggingfacehub_api_token=st.session_state.hf_api_key,
-            model_kwargs={
-                "temperature": st.session_state.temperature,
-                "top_p": st.session_state.top_p,
-                "do_sample": True,
-                "max_new_tokens": 1024,
-            },
-        )
+    # 4. Instantiate LLMs with Gemini Pro
+    standalone_query_generation_llm = ChatGoogleGenerativeAI(
+        google_api_key=GOOGLE_API_KEY,
+        model="gemini-1.5-pro",
+        temperature=0.1,
+        convert_system_message_to_human=True,
+    )
+    response_generation_llm = ChatGoogleGenerativeAI(
+        google_api_key=GOOGLE_API_KEY,
+        model="gemini-1.5-pro",
+        temperature=0.7,
+        convert_system_message_to_human=True,
+    )
 
     # 5. Create the ConversationalRetrievalChain
-
     chain = ConversationalRetrievalChain.from_llm(
         condense_question_prompt=condense_question_prompt,
         combine_docs_chain_kwargs={"prompt": answer_prompt},
@@ -899,15 +746,12 @@ def get_response_from_LLM(prompt):
         response = st.session_state.chain.invoke({"question": prompt})
         answer = response["answer"]
 
-        if st.session_state.LLM_provider == "HuggingFace":
-            answer = answer[answer.find("\nAnswer: ") + len("\nAnswer: ") :]
-
         # 2. Display results
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.messages.append({"role": "assistant", "content": answer})
         st.chat_message("user").write(prompt)
         with st.chat_message("assistant"):
-            # 2.1. Display anwser:
+            # 2.1. Display answer:
             st.markdown(answer)
 
             # 2.2. Display source documents:
@@ -955,14 +799,8 @@ def chatbot():
         st.chat_message(msg["role"]).write(msg["content"])
 
     if prompt := st.chat_input():
-        if (
-            not st.session_state.openai_api_key
-            and not st.session_state.google_api_key
-            and not st.session_state.hf_api_key
-        ):
-            st.info(
-                f"Please insert your {st.session_state.LLM_provider} API key to continue."
-            )
+        if not GOOGLE_API_KEY:
+            st.info("Please set the GOOGLE_API_KEY environment variable to continue.")
             st.stop()
         with st.spinner("Running..."):
             get_response_from_LLM(prompt=prompt)
